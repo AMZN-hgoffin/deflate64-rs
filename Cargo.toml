@@ -18,9 +18,15 @@ exclude = [
     "test-assets/**",
 ]
 
+[features]
+
 [dependencies]
 
 [dev-dependencies]
 bytemuck = { version = "1.13.1", features = ["derive"] }
 proptest = "1.2.0"
 tempfile = "3.7.1"
+
+[[bench]]
+name = "inflate"
+harness = false

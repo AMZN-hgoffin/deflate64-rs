@@ -35,6 +35,7 @@ impl OutputWindow {
     }
 
     /// <summary>Add a byte to output window.</summary>
+    #[inline(always)]
     pub fn write(&mut self, b: u8) {
         debug_assert!(
             self.bytes_used < WINDOW_SIZE,
@@ -46,45 +47,28 @@ impl OutputWindow {
         self.bytes_used += 1;
     }
 
-    pub fn write_length_distance(&mut self, mut length: usize, distance: usize) {
+    #[inline(always)]
+    pub fn write_length_distance(&mut self, length: usize, distance: usize) {
         debug_assert!((self.bytes_used + length) <= WINDOW_SIZE, "No Enough space");
 
         // move backwards distance bytes in the output stream,
         // and copy length bytes from this position to the output stream.
-        self.bytes_used += length;
-        let mut copy_start = (self.end.overflowing_sub(distance).0) & WINDOW_MASK; // start position for coping.
 
-        let border = WINDOW_SIZE - length;
-        if copy_start <= border && self.end < border {
-            if length <= distance {
-                // src, srcIdx, dst, dstIdx, len
-                // Array.copy(self._window, copy_start, self._window, self._end, length);
-                self.window
-                    .copy_within(copy_start..(copy_start + length), self.end);
-                self.end += length;
-            } else {
-                // The referenced string may overlap the current
-                // position; for example, if the last 2 bytes decoded have values
-                // X and Y, a string reference with <length = 5, distance = 2>
-                // adds X,Y,X,Y,X to the output stream.
-                while length > 0 {
-                    length -= 1;
-                    self.window[self.end] = self.window[copy_start];
-                    self.end += 1;
-                    copy_start += 1;
-                }
-            }
-        } else {
-            // copy byte by byte
-            while length > 0 {
-                length -= 1;
-                self.window[self.end] = self.window[copy_start];
-                self.end += 1;
-                copy_start += 1;
-                self.end &= WINDOW_MASK;
-                copy_start &= WINDOW_MASK;
-            }
+        // This function *could* have lots of special-case optimizations for long
+        // non-overlapping copies, repeated bytes / patterns for long fills with
+        // short distances, separate paths for wrapping/non-wrapping writes, etc.
+        // but simpler ends up faster due to inlining and avoiding misprediction.
+        self.bytes_used += length;
+        let mut from = self.end.wrapping_sub(distance) & WINDOW_MASK;
+        let mut to = self.end;
+
+        for _ in 0..length {
+            self.window[to] = self.window[from];
+            to = (to + 1) & WINDOW_MASK;
+            from = (from + 1) & WINDOW_MASK;
         }
+
+        self.end = to;
     }
 
     /// <summary>
