@@ -1,11 +1,13 @@
 use crate::{buffer::Buffer, input_buffer::InputBuffer};
 use std::cmp::min;
 
-// With Deflate64 we can have up to a 65536 length as well as up to a 65538 distance. This means we need a Window that is at
-// least 131074 bytes long so we have space to retrieve up to a full 64kb in look-back and place it in our buffer without
-// overwriting existing data. OutputWindow requires that the WINDOW_SIZE be an exponent of 2, so we round up to 2^18.
-const WINDOW_SIZE: usize = 262144;
-const WINDOW_MASK: usize = 262143;
+// With Deflate64 we can have up to a 65536 length as well as up to a 65538 distance. We need a power-of-two
+// window size that goes back at least 65538 bytes, and we can only write into it when there are at least
+// 65536 "free" bytes available for the maximum possible write length. However, it is OK if the free bytes
+// overlap the history window; we process length-distance match copies in the forward direction. It is fine
+// to wrap around and overwrite bytes that we have already copied forward.
+const WINDOW_SIZE: usize = 131072;
+const WINDOW_MASK: usize = 131071;
 
 /// <summary>
 /// This class maintains a window for decompressed output.
