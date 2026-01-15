@@ -106,7 +106,9 @@ impl<'a> InputBuffer<'a> {
     }
 
     // load_16bits_assume_input is an optimization of try_load_16bits when the caller knows
-    // that 16 input bits are avilable; results are undefined (but will not panic) otherwise
+    // that 16 bits are in the bit buffer or available as remaining input bytes. If this
+    // precondition is false, the call will assert in debug builds and fill with zeros in
+    // release builds (likely resulting in data error).
     #[inline(always)]
     pub fn load_16bits_assume_input(&mut self) -> u32 {
         if self.bits.bits_in_buffer < 16 {
@@ -115,21 +117,25 @@ impl<'a> InputBuffer<'a> {
                 self.bits.bit_buffer |= (word as u32) << self.bits.bits_in_buffer;
                 self.buffer = tail;
                 self.read_bytes += 2;
+            } else {
+                debug_assert!(false, "Not enough input available");
             }
             self.bits.bits_in_buffer += 16;
         }
-        self.bits.bit_buffer as u32
+        self.bits.bit_buffer
     }
 
-    // get_bits_assume_input is an optimization of get_bits when the caller knows that 16
-    // inputs are available; results are undefined (but will not panic) otherwise
+    // get_bits_assume_input is an optimization of get_bits using load_16bits_assume_input
+    // when the caller knows that 16 bits are in the bit buffer or available as remaining
+    // input bytes. If this precondition is false, the call will assert in debug builds and
+    // fill with zeros in release builds (likely resulting in data error).
     #[inline(always)]
     pub fn get_bits_assume_input(&mut self, count: i32) -> u32 {
         debug_assert!(0 < count && count <= 16, "count is invalid.");
         let result = self.load_16bits_assume_input() & self.get_bit_mask(count);
         self.bits.bit_buffer >>= count;
         self.bits.bits_in_buffer -= count;
-        result as u32
+        result
     }
 
     pub fn copy_to(&mut self, mut output: &mut [u8]) -> usize {

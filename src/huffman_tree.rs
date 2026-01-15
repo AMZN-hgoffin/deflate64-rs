@@ -1,8 +1,8 @@
 use crate::input_buffer::InputBuffer;
 use crate::InternalErr;
 
-// Packing: bits 0-9 = symbol (0-288), bits 10-13 = code length (1-16)
-const SYMBOL_BITS: u8 = 10;
+// Packing: bits 0-8 = symbol (0-288), bits 9-13 = code length (1-16), bits 14+ = zero
+const SYMBOL_BITS: u8 = 9;
 const SYMBOL_MASK: i16 = (1 << SYMBOL_BITS) - 1; // 0x3FF
 
 fn pack(symbol: i16, code_len: u8) -> i16 {
@@ -17,8 +17,13 @@ pub(crate) fn unpack(entry: i16) -> (u16, i32) {
 pub(crate) struct HuffmanTree {
     code_lengths_length: u16,
     table: [i16; 1 << Self::TABLE_BITS],
-    // Unified node storage: left child at index, right child at index+1
-    // Table stores -left_index (negative) for tree pointers
+    // Table stores positive or negative numbers. Positive numbers are packed symbols
+    // and code lengths (see pack/unpack above). Negative values are indexes into a
+    // binary tree of array nodes; consume additional bits for left/right navagation
+    // until a positive packed value is reached. Note, the original implementation had
+    // separate "left" and "right" tables, we have interleaved these tables to enable
+    // branchless left/right navigation with simple math. Left and right nodes come in
+    // pairs, where N*2 is a left node and N*2+1 is a right node.
     nodes: [i16; Self::MAX_CODE_LENGTHS * 4],
     code_length_array: [u8; Self::MAX_CODE_LENGTHS],
 }
@@ -194,19 +199,18 @@ impl HuffmanTree {
                     let mut overflow_bits = len - Self::TABLE_BITS; // the nodes we need to represent the data.
                     let mut code_bit_mask = 1 << Self::TABLE_BITS; // mask to get current bit (the bits can't fit in the table)
 
-                    // nodes array stores left/right children as pairs: left at 2*n, right at 2*n+1
-                    // When we got the first part (TABLE_BITS) and look at the table,
-                    // we follow the tree to find the real character.
-                    let mut index = start & ((1 << Self::TABLE_BITS) - 1);
-                    let mut in_table = true;
+                    // the left, right table is used to represent the
+                    // the rest bits. When we got the first part (number bits.) and look at
+                    // tbe table, we will need to follow the tree to find the real character.
+                    // This is in place to avoid bloating the table if there are
+                    // a few ones with long code.
+                    // As an optimization, we now store left/right together at N*2 and N*2+1.
+                    // We store (-left_index) as a pointer to newly allocated node pairs; the
+                    // get_symbol logic increments the negated left_index to get right_index.
+                    let mut index = start & Self::TABLE_BITS_MASK;
+                    let mut value: &mut i16 = &mut self.table[index];
 
                     while {
-                        let value = if in_table {
-                            &mut self.table[index]
-                        } else {
-                            &mut self.nodes[index]
-                        };
-
                         if *value == 0 {
                             // set up next pointer if this node is not used before.
                             // store -left_index directly (avail * 2)
@@ -219,19 +223,11 @@ impl HuffmanTree {
                             return Err(InternalErr::DataError); // InvalidHuffmanData
                         }
 
-                        debug_assert!(
-                            *value < 0,
-                            "create_table: Only negative numbers are used for tree pointers!"
-                        );
-
                         // left child at -value, right child at -value+1
                         let left_index = (-*value) as usize;
                         index = left_index + ((start & code_bit_mask) != 0) as usize;
-                        in_table = false;
 
-                        if index >= self.nodes.len() {
-                            return Err(InternalErr::DataError); // InvalidHuffmanData
-                        }
+                        value = self.nodes.get_mut(index).ok_or(InternalErr::DataError)?; // InvalidHuffmanData
 
                         code_bit_mask <<= 1;
                         overflow_bits -= 1;
@@ -239,7 +235,7 @@ impl HuffmanTree {
                         overflow_bits != 0
                     } {}
 
-                    self.nodes[index] = pack(ch as i16, len);
+                    *value = pack(ch as i16, len);
                 }
             }
         }
@@ -286,12 +282,19 @@ impl HuffmanTree {
         }
 
         input.skip_bits(code_length);
-
         Ok(symbol)
     }
 
+    // get_next_symbol_assume_input is an optimization of get_next_symbol when the caller
+    // knows that 16 bits exist in the bit buffer or are available as input bytes. It is
+    // meant for use in an optimized decode loop that strictly verifies this precondition.
+    // If the precondition is violated, the call will assert in debug builds and is likely
+    // to produce an incorrect symbol in release builds.
     #[inline(always)]
-    pub fn get_next_symbol_assume_input(&self, input: &mut InputBuffer<'_>) -> Result<u16, InternalErr> {
+    pub fn get_next_symbol_assume_input(
+        &self,
+        input: &mut InputBuffer<'_>,
+    ) -> Result<u16, InternalErr> {
         debug_assert_ne!(self.code_lengths_length, 0, "invalid table");
         let bit_buffer = input.load_16bits_assume_input();
         let mut entry = self.table[bit_buffer as usize & Self::TABLE_BITS_MASK];

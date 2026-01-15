@@ -347,7 +347,7 @@ impl InflaterManaged {
         if self.state == InflaterState::DecodeTop {
             // Tight inner loop for decoding and processing deflate symbols when we know
             // that there is both enough input available and also sufficient output space.
-            // State machine variables are not used and everything remains in DecodeTop.
+            // State machine variables are not modified and self.state stays as DecodeTop.
             match self.decode_block_fast_inner_loop(input) {
                 Ok((_, true)) => {
                     // End of block reached
@@ -359,7 +359,7 @@ impl InflaterManaged {
                     // No fast progress, fall through to slower but comprehensive
                     // state machine implementation which can load partial input.
                 }
-                Ok(_) => {
+                Ok((_, false)) => {
                     // Some fast progress was made. Return so that output can be
                     // consumed by the caller and/or more input can be provided.
                     return Ok(());
@@ -368,7 +368,7 @@ impl InflaterManaged {
                     return Err(InternalErr::DataError);
                 }
                 Err(InternalErr::DataNeeded) => {
-                    unreachable!("fast inner loop")
+                    unreachable!("fast inner loop never returns DataNeeded")
                 }
             }
         }
@@ -490,13 +490,19 @@ impl InflaterManaged {
         let initial_free = self.output.free_bytes();
 
         loop {
-            // Exit if low on output space or input. Max input that can be read per loop is 64 bits
-            // (assuming every single code and extra_bits read is 16 bits)
-            if self.output.free_bytes() <= TABLE_LOOKUP_LENGTH_MAX || input.available_bytes() < 8 {
+            // Exit fast path if low on output space or input bits.
+            // Maximum input consumed per iteration is 64 bits, or 8 bytes:
+            //  16 bits for initial symbol value >= 257, indicating match length
+            //  16 bits for match length "extra bits"
+            //  16 bits for distance symbol
+            //  16 bits for distance "extra bits"
+            if self.output.free_bytes() < TABLE_LOOKUP_LENGTH_MAX || input.available_bytes() < 8 {
                 return Ok((initial_free - self.output.free_bytes(), false));
             }
 
-            let symbol = self.literal_length_tree.get_next_symbol_assume_input(input)?;
+            let symbol = self
+                .literal_length_tree
+                .get_next_symbol_assume_input(input)?;
             match symbol {
                 0..=255 => {
                     // Literal byte

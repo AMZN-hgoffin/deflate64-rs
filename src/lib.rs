@@ -17,7 +17,6 @@ mod stream;
 pub use inflater_managed::InflaterManaged;
 pub use stream::Deflate64Decoder;
 
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum BlockType {
     Uncompressed = 0,
