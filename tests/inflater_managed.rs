@@ -94,3 +94,25 @@ fn binary_wav_shredded(chunk: usize) {
         BINARY_WAV_DATA
     );
 }
+
+#[test]
+fn not_finished_until_drained() {
+    // Hand-built: literal 0, static block [ match 65535 dist 1, match 65536 dist 1, end ]
+    let input = &[0x63, 0x18, 0xe5, 0xff, 0x07, 0xa3, 0xfd, 0xff, 0x00, 0x00];
+    let expected_len = 1 + 65535 + 65536;
+
+    let mut output = vec![0xFFu8; expected_len + 100];
+
+    let mut inflater = InflaterManaged::new();
+    let result = inflater.inflate(input, &mut output[..expected_len - 1]);
+    assert_eq!(result.bytes_consumed, input.len());
+    assert_eq!(result.bytes_written, expected_len - 1);
+    assert!(inflater.input_finished());
+    assert!(!inflater.finished());
+
+    let result2 = inflater.inflate(&[], &mut output[expected_len - 1..]);
+    assert_eq!(result2.bytes_written, 1);
+    assert!(inflater.finished());
+    assert!(!inflater.errored());
+    assert!(output[..expected_len].iter().all(|&b| b == 0));
+}

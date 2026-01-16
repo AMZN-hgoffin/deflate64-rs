@@ -2,6 +2,8 @@ use crate::buffer::Buffer;
 use crate::huffman_tree::HuffmanTree;
 use crate::input_buffer::{BitsBuffer, InputBuffer};
 use crate::output_window::OutputWindow;
+#[cfg(feature = "checkpoint")]
+use crate::CheckpointStreamPositions;
 use crate::{array_copy, array_copy1, BlockType, InflateResult, InflaterState, InternalErr};
 use std::cmp::min;
 use std::mem::MaybeUninit;
@@ -75,6 +77,18 @@ pub struct InflaterManaged {
     code_length_tree: HuffmanTree,
     uncompressed_size: usize,
     current_inflated_count: usize,
+
+    // Cumulative counters updated once per inflate call
+    total_input_loaded: u64, // total bytes loaded into bit reader, only updated after decode()
+    total_output_consumed: u64, // total bytes already returned to caller
+
+    // Lightweight checkpoint: updated after every write to output window
+    #[cfg(feature = "checkpoint")]
+    checkpoint_input_bits: u64, // exact input bit position of checkpoint
+    #[cfg(feature = "checkpoint")]
+    checkpoint_bit_buffer: u8, // low byte of input bit_buffer (future bits)
+    #[cfg(feature = "checkpoint")]
+    checkpoint_bfinal_block_type: u8, // (bfinal << 7) | block_type
 }
 
 impl InflaterManaged {
@@ -114,13 +128,29 @@ impl InflaterManaged {
             distance_tree: HuffmanTree::invalid(),
             length_code: 0,
             current_inflated_count: 0,
+            total_input_loaded: 0,
+            total_output_consumed: 0,
+            #[cfg(feature = "checkpoint")]
+            checkpoint_input_bits: 0,
+            #[cfg(feature = "checkpoint")]
+            checkpoint_bit_buffer: 0,
+            #[cfg(feature = "checkpoint")]
+            checkpoint_bfinal_block_type: 0,
         }
     }
 
-    /// Returns true if deflating finished
+    /// Returns true if dcompression finished and no more output is available
     ///
     /// This also returns true if this inflater is in error state
     pub fn finished(&self) -> bool {
+        (self.state == InflaterState::Done && self.available_output() == 0)
+            || self.state == InflaterState::DataErrored
+    }
+
+    /// Returns true if decompression finished, but may still have output available in buffer
+    ///
+    /// This also returns true if this inflater is in error state
+    pub fn input_finished(&self) -> bool {
         self.state == InflaterState::Done || self.state == InflaterState::DataErrored
     }
 
@@ -177,6 +207,7 @@ impl InflaterManaged {
             if copied > 0 {
                 output = output.index_mut(copied..);
                 result.bytes_written += copied;
+                self.total_output_consumed += copied as u64;
             }
 
             if output.is_empty() {
@@ -187,7 +218,7 @@ impl InflaterManaged {
             if self.errored() {
                 result.data_error = true;
                 break 'while_loop false;
-            } else if self.finished() {
+            } else if self.input_finished() {
                 break 'while_loop false;
             }
             match self.decode(&mut input) {
@@ -202,6 +233,7 @@ impl InflaterManaged {
         } {}
 
         self.bits = input.bits;
+        self.total_input_loaded += input.read_bytes as u64;
         result.bytes_consumed = input.read_bytes;
         result
     }
@@ -212,7 +244,7 @@ impl InflaterManaged {
 
         if self.errored() {
             return Err(InternalErr::DataError);
-        } else if self.finished() {
+        } else if self.input_finished() {
             return Ok(());
         }
 
@@ -318,8 +350,11 @@ impl InflaterManaged {
                         // Done with this block, need to re-init bit buffer for next block
                         self.state = InflaterState::ReadingBFinal;
                         *end_of_block = true;
+                        self.update_checkpoint_after_write(input, true);
                         return Ok(());
                     }
+
+                    self.update_checkpoint_after_write(input, false);
 
                     // We can fail to copy all bytes for two reasons:
                     //    Running out of Input
@@ -353,6 +388,7 @@ impl InflaterManaged {
                     // End of block reached
                     *end_of_block_code_seen = true;
                     self.state = InflaterState::ReadingBFinal;
+                    self.update_checkpoint_after_write(input, true);
                     return Ok(());
                 }
                 Ok((0, false)) => {
@@ -362,6 +398,7 @@ impl InflaterManaged {
                 Ok((_, false)) => {
                     // Some fast progress was made. Return so that output can be
                     // consumed by the caller and/or more input can be provided.
+                    self.update_checkpoint_after_write(input, false);
                     return Ok(());
                 }
                 Err(InternalErr::DataError) => {
@@ -375,7 +412,7 @@ impl InflaterManaged {
 
         // State machine path
         let mut free_bytes = self.output.free_bytes();
-        while free_bytes > TABLE_LOOKUP_LENGTH_MAX {
+        while free_bytes >= TABLE_LOOKUP_LENGTH_MAX {
             // With Deflate64 we can have up to a 64kb length, so we ensure at least that much space is available
             // in the OutputWindow to avoid overwriting previous unflushed output data.
 
@@ -392,11 +429,13 @@ impl InflaterManaged {
                         // literal
                         self.output.write(symbol as u8);
                         free_bytes -= 1;
+                        self.update_checkpoint_after_write(input, false);
                     } else if symbol == 256 {
                         // end of block
                         *end_of_block_code_seen = true;
                         // Reset state
                         self.state = InflaterState::ReadingBFinal;
+                        self.update_checkpoint_after_write(input, true);
                         return Ok(());
                     } else {
                         // length/distance pair
@@ -468,6 +507,7 @@ impl InflaterManaged {
                     self.output.write_length_distance(self.length, offset);
                     free_bytes -= self.length;
                     self.state = InflaterState::DecodeTop;
+                    self.update_checkpoint_after_write(input, false);
                 }
 
                 _ => {
@@ -740,4 +780,12 @@ impl InflaterManaged {
         self.state = InflaterState::DecodeTop;
         Ok(())
     }
+
+    #[cfg(not(feature = "checkpoint"))]
+    #[inline]
+    #[allow(unused_variables)]
+    fn update_checkpoint_after_write(&mut self, input: &InputBuffer<'_>, end_of_block: bool) {}
 }
+
+#[cfg(feature = "checkpoint")]
+include!("inflater_managed_checkpoint.rs");
