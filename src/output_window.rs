@@ -1,11 +1,13 @@
 use crate::{buffer::Buffer, input_buffer::InputBuffer};
 use std::cmp::min;
 
-// With Deflate64 we can have up to a 65536 length as well as up to a 65538 distance. This means we need a Window that is at
-// least 131074 bytes long so we have space to retrieve up to a full 64kb in look-back and place it in our buffer without
-// overwriting existing data. OutputWindow requires that the WINDOW_SIZE be an exponent of 2, so we round up to 2^18.
-const WINDOW_SIZE: usize = 262144;
-const WINDOW_MASK: usize = 262143;
+// With Deflate64 we can have up to a 65536 length as well as up to a 65538 distance. We need a power-of-two
+// window size that goes back at least 65538 bytes, and we can only write into it when there are at least
+// 65536 "free" bytes available for the maximum possible write length. However, it is OK if the free bytes
+// overlap the history window; we process length-distance match copies in the forward direction. It is fine
+// to wrap around and overwrite bytes that we have already copied forward.
+const WINDOW_SIZE: usize = 131072;
+const WINDOW_MASK: usize = 131071;
 
 /// <summary>
 /// This class maintains a window for decompressed output.
@@ -35,6 +37,7 @@ impl OutputWindow {
     }
 
     /// <summary>Add a byte to output window.</summary>
+    #[inline(always)]
     pub fn write(&mut self, b: u8) {
         debug_assert!(
             self.bytes_used < WINDOW_SIZE,
@@ -46,45 +49,28 @@ impl OutputWindow {
         self.bytes_used += 1;
     }
 
-    pub fn write_length_distance(&mut self, mut length: usize, distance: usize) {
+    #[inline(always)]
+    pub fn write_length_distance(&mut self, length: usize, distance: usize) {
         debug_assert!((self.bytes_used + length) <= WINDOW_SIZE, "No Enough space");
 
         // move backwards distance bytes in the output stream,
         // and copy length bytes from this position to the output stream.
-        self.bytes_used += length;
-        let mut copy_start = (self.end.overflowing_sub(distance).0) & WINDOW_MASK; // start position for coping.
 
-        let border = WINDOW_SIZE - length;
-        if copy_start <= border && self.end < border {
-            if length <= distance {
-                // src, srcIdx, dst, dstIdx, len
-                // Array.copy(self._window, copy_start, self._window, self._end, length);
-                self.window
-                    .copy_within(copy_start..(copy_start + length), self.end);
-                self.end += length;
-            } else {
-                // The referenced string may overlap the current
-                // position; for example, if the last 2 bytes decoded have values
-                // X and Y, a string reference with <length = 5, distance = 2>
-                // adds X,Y,X,Y,X to the output stream.
-                while length > 0 {
-                    length -= 1;
-                    self.window[self.end] = self.window[copy_start];
-                    self.end += 1;
-                    copy_start += 1;
-                }
-            }
-        } else {
-            // copy byte by byte
-            while length > 0 {
-                length -= 1;
-                self.window[self.end] = self.window[copy_start];
-                self.end += 1;
-                copy_start += 1;
-                self.end &= WINDOW_MASK;
-                copy_start &= WINDOW_MASK;
-            }
+        // This function *could* have lots of special-case optimizations for long
+        // non-overlapping copies, repeated bytes / patterns for long fills with
+        // short distances, separate paths for wrapping/non-wrapping writes, etc.
+        // but simpler ends up faster due to inlining and avoiding misprediction.
+        self.bytes_used += length;
+        let mut from = self.end.wrapping_sub(distance) & WINDOW_MASK;
+        let mut to = self.end;
+
+        for _ in 0..length {
+            self.window[to] = self.window[from];
+            to = (to + 1) & WINDOW_MASK;
+            from = (from + 1) & WINDOW_MASK;
         }
+
+        self.end = to;
     }
 
     /// <summary>

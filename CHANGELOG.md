@@ -8,8 +8,10 @@ The format is based on [Keep a Changelog].
 
 ## [Unreleased]
 ### Added
+- test: `cargo bench` simple benchmark
 
 ### Changed
+- perf: optimize decoder inner loop for 2x performance [`#41`](https://github.com/anatawa12/deflate64-rs/pull/41)
 
 ### Deprecated
 
