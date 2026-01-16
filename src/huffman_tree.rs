@@ -3,7 +3,7 @@ use crate::InternalErr;
 
 // Packing: bits 0-8 = symbol (0-288), bits 9-13 = code length (1-16), bits 14+ = zero
 const SYMBOL_BITS: u8 = 9;
-const SYMBOL_MASK: i16 = (1 << SYMBOL_BITS) - 1; // 0x3FF
+const SYMBOL_MASK: i16 = (1 << SYMBOL_BITS) - 1; // 0x1FF
 
 fn pack(symbol: i16, code_len: u8) -> i16 {
     symbol | ((code_len as i16) << SYMBOL_BITS)
