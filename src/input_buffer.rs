@@ -17,7 +17,7 @@ impl BitsBuffer {
 
     #[allow(dead_code)]
     pub(crate) fn from_bits(bits: u32, num_bits: i32) -> BitsBuffer {
-        debug_assert!(num_bits >= 0 && num_bits < 32);
+        debug_assert!((0..=32).contains(&num_bits));
         let mask = (!0u32).unbounded_shr(num_bits as u32);
         Self {
             bit_buffer: bits & mask,

@@ -28,13 +28,20 @@ const CHECKPOINT_HEADER_SIZE: usize = 346;
 impl InflaterManaged {
     #[inline]
     fn update_checkpoint_after_write(&mut self, input: &InputBuffer<'_>, end_of_block: bool) {
-        debug_assert!(match (self.state, end_of_block) {
-            (InflaterState::DecodeTop, false)
-            | (InflaterState::DecodingUncompressed, false) => true,
-            (InflaterState::ReadingBFinal, true) | (InflaterState::Done, true) => true,
-            _ => false,
-        });
-        if !end_of_block {
+        debug_assert!(input.available_bits() >= 0 && input.available_bits() <= 32);
+        self.checkpoint_input_bits = (self.total_input_loaded + input.read_bytes as u64) * 8
+            - input.available_bits() as u64;
+        self.checkpoint_bit_buffer = input.peek_available_bits() as u8;
+        self.checkpoint_bfinal_block_type = if end_of_block {
+            ebug_assert_eq!(
+                self.state,
+                matches!(self.block_type {
+                    BlockType::Uncompressed => InflaterState::DecodingUncompressed,
+                    BlockType::Static | BlockType::Dynamic => InflaterState::DecodeTop,
+                }
+            );
+            BlockType::Uncompressed as u8 | ((self.bfinal as u8) << 7)
+        } else {
             debug_assert_eq!(
                 self.state,
                 match self.block_type {
@@ -43,15 +50,6 @@ impl InflaterManaged {
                     BlockType::Dynamic => InflaterState::DecodeTop,
                 }
             );
-        }
-        debug_assert!(input.available_bits() >= 0 && input.available_bits() <= 32);
-        self.checkpoint_input_bits = (self.total_input_loaded + input.read_bytes as u64) * 8
-            - input.available_bits() as u64;
-        self.checkpoint_bit_buffer = input.peek_available_bits() as u8;
-        self.checkpoint_bfinal_block_type = if end_of_block {
-            debug_assert_eq!(self.block_length, 0);
-            BlockType::Uncompressed as u8 | ((self.bfinal as u8) << 7)
-        } else {
             self.block_type as u8 | ((self.bfinal as u8) << 7)
         }
     }
